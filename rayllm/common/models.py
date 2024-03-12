@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, TypeVar, Union
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, root_validator, validator
+from pydantic import ConfigDict, BaseModel, model_validator, field_validator
 
 if TYPE_CHECKING:
     from rayllm.backend.server.models import AviaryModelResponse
@@ -44,7 +44,7 @@ class TextChoice(BaseModel):
     text: str
     index: int
     logprobs: dict
-    finish_reason: Optional[str]
+    finish_reason: Optional[str] = None
 
 
 class Usage(BaseModel):
@@ -79,7 +79,7 @@ class Completion(BaseModel):
     created: int
     model: str
     choices: List[TextChoice]
-    usage: Optional[Usage]
+    usage: Optional[Usage] = None
 
     @classmethod
     def create(
@@ -113,7 +113,7 @@ class EmbeddingsOutput(BaseModel):
     object: str
     created: int
     model: str
-    usage: Optional[EmbeddingsUsage]
+    usage: Optional[EmbeddingsUsage] = None
 
 
 class FunctionCall(BaseModel):
@@ -183,7 +183,7 @@ class Message(BaseModel):
             return str(self.content)
         return str(self.dict())
 
-    @root_validator
+    @model_validator(mode="before")
     def check_fields(cls, values):
         if values["role"] in ["system", "user"]:
             if not isinstance(values.get("content"), str):
@@ -233,8 +233,7 @@ class DeltaContent(BaseModel):
 
 
 class DeltaEOS(BaseModel):
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ChoiceLogProbs(BaseModel):
@@ -251,7 +250,7 @@ class MessageChoices(BaseModel):
 class DeltaChoices(BaseModel):
     delta: Union[DeltaRole, DeltaContent, DeltaEOS]
     index: int
-    finish_reason: Optional[str]
+    finish_reason: Optional[str] = None
     logprobs: Optional[ChoiceLogProbs] = None
 
 
@@ -261,7 +260,7 @@ class ChatCompletion(BaseModel):
     created: int
     model: str
     choices: List[Union[MessageChoices, DeltaChoices]]
-    usage: Optional[Usage]
+    usage: Optional[Usage] = None
 
     @classmethod
     def create(
@@ -289,7 +288,8 @@ class Prompt(BaseModel):
     tools: Optional[List[Tool]] = None
     tool_choice: Union[Literal["auto", "none"], ToolChoice] = "auto"
 
-    @validator("prompt")
+    @field_validator("prompt")
+    @classmethod
     def check_prompt(cls, value):
         if isinstance(value, list) and not value:
             raise ValueError("Messages cannot be an empty list.")
@@ -320,8 +320,7 @@ class ErrorResponse(BaseModel):
 
 
 class AbstractPromptFormat(BaseModel):
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
     def generate_prompt(self, messages: Union[Prompt, List[Message]]) -> str:
         raise NotImplementedError()
@@ -338,28 +337,31 @@ class PromptFormat(AbstractPromptFormat):
     add_system_tags_even_if_message_is_empty: bool = False
     strip_whitespace: bool = True
 
-    @validator("system")
+    @field_validator("system")
+    @classmethod
     def check_system(cls, value):
         assert value and (
             "{instruction}" in value
         ), "system must be a string containing '{instruction}'"
         return value
 
-    @validator("assistant")
+    @field_validator("assistant")
+    @classmethod
     def check_assistant(cls, value):
         assert (
             value and "{instruction}" in value
         ), "assistant must be a string containing '{instruction}'"
         return value
 
-    @validator("user")
+    @field_validator("user")
+    @classmethod
     def check_user(cls, value):
         assert value and (
             "{instruction}" in value
         ), "user must be a string containing '{instruction}'"
         return value
 
-    @root_validator
+    @model_validator(mode="before")
     def check_user_system_in_user(cls, values):
         if values["system_in_user"]:
             assert (
@@ -424,11 +426,11 @@ class PromptFormat(AbstractPromptFormat):
                     prompt.append(
                         self.user.format(
                             instruction=message_content,
-                            system=self.system.format(
-                                instruction=system_message.content
-                            )
-                            if system_message
-                            else "",
+                            system=(
+                                self.system.format(instruction=system_message.content)
+                                if system_message
+                                else ""
+                            ),
                         )
                     )
                     system_message = None

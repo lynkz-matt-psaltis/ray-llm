@@ -1,6 +1,8 @@
 import logging
 from typing import Any, Dict, Optional
 
+from pydantic import ConfigDict
+
 from rayllm.backend.server.models import (
     EngineConfig,
     EngineType,
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 class VLLMEngineConfig(EngineConfig):
+    model_config = ConfigDict(protected_namespaces=())
+
     type: EngineType = EngineType.VLLMEngine
     model_type: ModelType = ModelType.text_generation
     model_url: Optional[str] = None

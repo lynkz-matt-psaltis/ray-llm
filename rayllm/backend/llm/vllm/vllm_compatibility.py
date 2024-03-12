@@ -178,7 +178,6 @@ class AviaryAsyncLLMEngine(AsyncLLMEngine):
             engine_args.worker_use_ray,
             engine_args.engine_use_ray,
             *engine_configs,
-            None,
             placement_group,
             runtime_env=runtime_env,
             log_requests=not engine_args.disable_log_requests,

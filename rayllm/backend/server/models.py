@@ -21,13 +21,10 @@ from typing import (
 import yaml
 from markdown_it import MarkdownIt
 from pydantic import (
-    BaseModel,
-    Extra,
+    field_validator, ConfigDict, BaseModel,
     Field,
     PrivateAttr,
-    conlist,
-    root_validator,
-    validator,
+    model_validator,
 )
 from ray.air import ScalingConfig as AIRScalingConfig
 from ray.serve.config import AutoscalingConfig
@@ -58,6 +55,7 @@ from rayllm.env_conf import (
     ALLOW_NEW_PLACEMENT_GROUPS_IN_DEPLOYMENT,
     MAX_NUM_STOPPING_SEQUENCES,
 )
+from typing_extensions import Annotated
 
 T = TypeVar("T")
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -200,7 +198,7 @@ class AviaryModelResponse(ComputedPropertyMixin, BaseModelExtended):
     finish_reason: Optional[str] = None
     error: Optional[ErrorResponse] = None
 
-    @root_validator
+    @model_validator(mode="before")
     def text_or_error_or_finish_reason(cls, values):
         if (
             values.get("generated_text") is None
@@ -351,7 +349,7 @@ class BatchedAviaryModelResponse(AviaryModelResponse):
 
 class S3AWSCredentials(BaseModelExtended):
     create_aws_credentials_url: str
-    auth_token_env_variable: Optional[str]
+    auth_token_env_variable: Optional[str] = None
 
 
 class ExtraFiles(BaseModelExtended):
@@ -370,7 +368,8 @@ class GCSMirrorConfig(BaseModelExtended):
     bucket_uri: str
     extra_files: List[ExtraFiles] = Field(default_factory=list)
 
-    @validator("bucket_uri")
+    @field_validator("bucket_uri")
+    @classmethod
     def check_uri_format(cls, value: str):
         if not value.startswith("gs://"):
             raise ValueError(
@@ -385,11 +384,13 @@ class GenerationConfig(BaseModelExtended):
     generate_kwargs: Dict[str, Any] = {}
     stopping_sequences: Optional[List[Union[str, int, List[Union[str, int]]]]] = None
 
-    @validator("prompt_format")
+    @field_validator("prompt_format")
+    @classmethod
     def default_prompt_format(cls, prompt_format):
         return prompt_format if prompt_format is not None else DisabledPromptFormat()
 
-    @validator("stopping_sequences")
+    @field_validator("stopping_sequences")
+    @classmethod
     def check_stopping_sequences(cls, value):
         def try_int(x):
             if isinstance(x, list):
@@ -423,15 +424,13 @@ class ModelType(str, Enum):
 
 
 class EngineConfig(BaseModelExtended):
-    class Config:
-        use_enum_values = True
-        extra = Extra.forbid
+    model_config = ConfigDict(use_enum_values=True, extra="forbid", protected_namespaces=())
 
     model_id: str
     hf_model_id: Optional[str] = None
     type: EngineType
     model_type: ModelType
-    tokenizer_id: Optional[str]
+    tokenizer_id: Optional[str] = None
 
     s3_mirror_config: Optional[S3MirrorConfig] = None
     gcs_mirror_config: Optional[GCSMirrorConfig] = None
@@ -445,10 +444,12 @@ class EngineConfig(BaseModelExtended):
     # These will be copied to the runtime env
     env_vars_to_propogate: List[str] = list(ENV_VARS_TO_PROPAGATE)
 
-    @validator("gcs_mirror_config")
+    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
+    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
+    @field_validator("gcs_mirror_config")
     def check_only_one_mirror_config_specified(cls, value, values):
         gcs_config = value
-        s3_config = values["s3_mirror_config"]
+        s3_config = values.data["s3_mirror_config"]
 
         if gcs_config is not None and s3_config is not None:
             raise ValueError(
@@ -489,9 +490,7 @@ class EngineConfig(BaseModelExtended):
 class SchedulingMetadata(BaseModelExtended):
     request_id: Union[str, List[str]]
     priority: Union[QueuePriority, List[QueuePriority]]
-
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class SamplingParams(BaseModelExtended):
@@ -531,7 +530,7 @@ class SamplingParams(BaseModelExtended):
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
-    stop: Optional[List[str]] = None
+    stop: Optional[List[str]] = Field(validate_default=True, default=None)
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     best_of: int = 1
@@ -540,14 +539,14 @@ class SamplingParams(BaseModelExtended):
     def dict(self, **kwargs):
         if kwargs.get("exclude", None) is None:
             kwargs["exclude"] = self._ignored_fields
-        return super().dict(**kwargs)
+        return super().model_dump(**kwargs)
 
-    @validator("stop", always=True)
-    def validate_stopping_sequences(cls, values):
+    @field_validator("stop")
+    def validate_stopping_sequences(cls, _, values):
         if not values:
             return values
 
-        unique_val = sorted(list(set(values)))
+        unique_val = sorted(list(set(values.data)))
 
         if len(unique_val) > MAX_NUM_STOPPING_SEQUENCES:
             TooManyStoppingSequences(
@@ -583,7 +582,7 @@ class SamplingParams(BaseModelExtended):
 class GenerationRequest(BaseModelExtended):
     prompt: Union[str, List[int], List[str]]
     request_id: Union[str, List[str]]
-    sampling_params: Optional[Union[SamplingParams, List[SamplingParams]]]
+    sampling_params: Optional[Union[SamplingParams, List[SamplingParams]]] = None
     scheduling_metadata: Union[SchedulingMetadata, List[SchedulingMetadata]]
 
 
@@ -603,7 +602,7 @@ class ChatCompletions(BaseModelExtended):
     """
 
     model: str
-    messages: conlist(Message, min_items=1)
+    messages: Annotated[List[Message], Field(min_length=1)]
     stream: bool = False
     echo: Optional[bool] = False
     user: Optional[str] = None
@@ -640,7 +639,7 @@ class Embeddings(BaseModelExtended):
     """
 
     model: str
-    input: Union[str, conlist(str, min_items=1)]
+    input: Union[str, Annotated[List[str], Field(min_items=1)]]
     user: Optional[str] = None
 
 
@@ -652,7 +651,8 @@ class ScalingConfig(BaseModelExtended):
     resources_per_worker: Optional[Dict[str, float]] = None
     pg_timeout_s: float = 600
 
-    @validator("num_gpus_per_worker")
+    @field_validator("num_gpus_per_worker")
+    @classmethod
     def validate_num_gpus_per_worker(cls, value):
         if value > 1:
             raise ValueError(
@@ -689,7 +689,7 @@ class ServeMultiplexConfig(BaseModelExtended):
 
 
 class DeploymentConfig(BaseModelExtended):
-    autoscaling_config: Optional[AutoscalingConfig]
+    autoscaling_config: Optional[AutoscalingConfig] = None
     max_concurrent_queries: Optional[int] = None
     ray_actor_options: Optional[Dict[str, Any]] = None
 
@@ -787,9 +787,9 @@ class HasModelId(Protocol):
     model_id: str
 
 
-class ChatCompletionsParams(ChatCompletions, SamplingParams, extra=Extra.allow):
+class ChatCompletionsParams(ChatCompletions, SamplingParams, extra="allow"):
     pass
 
 
-class CompletionsParams(Completions, SamplingParams, extra=Extra.allow):
+class CompletionsParams(Completions, SamplingParams, extra="allow"):
     max_tokens: Optional[int] = 16
