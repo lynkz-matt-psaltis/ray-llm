@@ -56,7 +56,7 @@ class VLLMEngine:
         assert isinstance(
             llm_app, VLLMApp
         ), f"Got invalid config {llm_app} of type {type(llm_app)}"
-        self.llm_app = llm_app.copy(deep=True)
+        self.llm_app = llm_app.model_copy(deep=True)
         self.engine_config = llm_app.engine_config
         self.placement_config = llm_app.placement_config
         if not (self.placement_config.scaling_config.num_gpus_per_worker > 0):
@@ -274,6 +274,7 @@ class VLLMEngine:
                     raise ValueError(
                         "if top_logprobs is specified, logprobs must be set to `True`"
                     )
+
             return VLLMInternalSamplingParams(
                 n=1,
                 best_of=sampling_params.best_of,

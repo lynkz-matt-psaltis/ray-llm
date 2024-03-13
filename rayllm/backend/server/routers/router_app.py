@@ -469,7 +469,7 @@ class Router:
                 logprobs = results.logprobs
                 if logprobs:
                     logprobs = ChoiceLogProbs(
-                        content=[LogProbs.parse_obj(logprob) for logprob in logprobs]
+                        content=[LogProbs.model_validate(logprob) for logprob in logprobs]
                     )
                 else:
                     logprobs = None

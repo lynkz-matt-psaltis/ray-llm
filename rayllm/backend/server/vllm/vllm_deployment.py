@@ -1,6 +1,8 @@
 import logging
 import os
 
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
+
 from ray import serve
 
 from rayllm.backend.llm.vllm.vllm_engine import VLLMEngine
@@ -66,6 +68,23 @@ class VLLMDeploymentImpl:
                 request_id=request_id, priority=priority
             ),
         )
+
+        # lora_request = self._maybe_get_lora(request)
+        print("Here1")
+        tokenizer = self.engine.engine.engine.tokenizer.tokenizer
+        print("Here2")
+        guided_decode_logit_processor = await get_guided_decoding_logits_processor(
+            vllm_request.sampling_params, tokenizer
+        )
+        print("Here3")
+
+        if guided_decode_logit_processor is not None:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = []
+            sampling_params.logits_processors.append(guided_decode_logit_processor)
+
+        print(vllm_request)
+
         async for aviary_model_response in self.engine.generate(vllm_request):
             yield aviary_model_response
 
@@ -87,5 +106,4 @@ class VLLMDeploymentImpl:
     health_check_period_s=30,
     health_check_timeout_s=30,
 )
-class VLLMDeployment(VLLMDeploymentImpl):
-    ...
+class VLLMDeployment(VLLMDeploymentImpl): ...

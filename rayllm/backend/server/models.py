@@ -16,12 +16,17 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    Callable,
 )
 
 import yaml
+import torch
+
 from markdown_it import MarkdownIt
 from pydantic import (
-    field_validator, ConfigDict, BaseModel,
+    field_validator,
+    ConfigDict,
+    BaseModel,
     Field,
     PrivateAttr,
     model_validator,
@@ -60,6 +65,11 @@ from typing_extensions import Annotated
 T = TypeVar("T")
 ModelT = TypeVar("ModelT", bound=BaseModel)
 logger = logging.getLogger(__name__)
+
+LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
+"""LogitsProcessor is a function that takes a list of previously generated
+tokens and a tensor of the logits for the next token, and returns a modified
+tensor of logits to sample from."""
 
 
 class QueuePriority(IntEnum):
@@ -101,7 +111,7 @@ class BaseModelExtended(BaseModel):
     def parse_yaml(cls: Type[ModelT], file, **kwargs) -> ModelT:
         kwargs.setdefault("Loader", yaml.SafeLoader)
         dict_args = yaml.load(file, **kwargs)
-        return cls.parse_obj(dict_args)
+        return cls.model_validate(dict_args)
 
     def yaml(
         self,
@@ -121,7 +131,7 @@ class BaseModelExtended(BaseModel):
         """
         return yaml.dump(
             json.loads(
-                self.json(
+                self.model_dump_json(
                     include=include,
                     exclude=exclude,
                     by_alias=by_alias,
@@ -424,7 +434,9 @@ class ModelType(str, Enum):
 
 
 class EngineConfig(BaseModelExtended):
-    model_config = ConfigDict(use_enum_values=True, extra="forbid", protected_namespaces=())
+    model_config = ConfigDict(
+        use_enum_values=True, extra="forbid", protected_namespaces=()
+    )
 
     model_id: str
     hf_model_id: Optional[str] = None
@@ -444,8 +456,6 @@ class EngineConfig(BaseModelExtended):
     # These will be copied to the runtime env
     env_vars_to_propogate: List[str] = list(ENV_VARS_TO_PROPAGATE)
 
-    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
-    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
     @field_validator("gcs_mirror_config")
     def check_only_one_mirror_config_specified(cls, value, values):
         gcs_config = value
@@ -516,8 +526,8 @@ class SamplingParams(BaseModelExtended):
         best_of: Generates `best_of` completions server-side and returns the "best".
         logit_bias: Modify the likelihood of specified tokens appearing in
             the completion.
-        response_format: Format to return the final response in. Can be for ex:
-            response_format={"type": "json", "schema": "{...}"}
+        logits_processors: List of functions that modify logits based on
+            previously generated tokens.
 
     """
 
@@ -530,11 +540,14 @@ class SamplingParams(BaseModelExtended):
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
     logit_bias: Optional[Dict[str, float]] = None
+    logits_processors: Optional[List[LogitsProcessor]] = None
     stop: Optional[List[str]] = Field(validate_default=True, default=None)
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     best_of: int = 1
-    response_format: Optional[Dict[str, Any]] = None
+    guided_json: Optional[Union[str, dict, BaseModel]] = None
+    guided_regex: Optional[str] = None
+    guided_choice: Optional[List[str]] = None
 
     def dict(self, **kwargs):
         if kwargs.get("exclude", None) is None:
@@ -542,11 +555,11 @@ class SamplingParams(BaseModelExtended):
         return super().model_dump(**kwargs)
 
     @field_validator("stop")
-    def validate_stopping_sequences(cls, _, values):
-        if not values:
-            return values
+    def validate_stopping_sequences(cls, v):
+        if not v:
+            return v
 
-        unique_val = sorted(list(set(values.data)))
+        unique_val = sorted(list(set(v)))
 
         if len(unique_val) > MAX_NUM_STOPPING_SEQUENCES:
             TooManyStoppingSequences(
@@ -555,6 +568,23 @@ class SamplingParams(BaseModelExtended):
 
         return unique_val
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_guided_decoding_count(cls, data):
+        guide_count = sum(
+            [
+                "guided_json" in data and data["guided_json"] is not None,
+                "guided_regex" in data and data["guided_regex"] is not None,
+                "guided_choice" in data and data["guided_choice"] is not None,
+            ]
+        )
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding "
+                "('guided_json', 'guided_regex' or 'guided_choice')."
+            )
+        return data
+
     @classmethod
     def merge_generation_params(
         cls: Type[ModelT], prompt: Prompt, generation: GenerationConfig
@@ -562,7 +592,7 @@ class SamplingParams(BaseModelExtended):
         # Extract parameters object from prompt
         parameters = prompt.parameters or {}
         if not isinstance(parameters, dict):
-            parameters = parameters.dict()
+            parameters = parameters.model_dump()
 
         # Merge in the generate kwargs
         generate_kwargs_copy = copy.deepcopy(generation.generate_kwargs)
@@ -576,7 +606,7 @@ class SamplingParams(BaseModelExtended):
             generation.stopping_sequences or []
         )
 
-        return cls.parse_obj(generate_kwargs)
+        return cls.model_validate(generate_kwargs)
 
 
 class GenerationRequest(BaseModelExtended):
@@ -706,7 +736,7 @@ class LLMApp(Args):
         return self.engine_config.model_id
 
     def short_metadata(self):
-        return self.dict(
+        return self.model_dump(
             include={
                 "model_id": True,
                 "engine_config": {
